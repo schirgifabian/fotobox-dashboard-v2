@@ -287,11 +287,11 @@ class FotoboxApp:
 
         # Status-Anzeige
         self.status_text = ft.Text("System wartet auf Start…", size=20, weight=ft.FontWeight.BOLD)
-        self.timestamp_text = ft.Text("", size=12, color=ft.colors.GREY)
+        self.timestamp_text = ft.Text("", size=12, color=ft.Colors.GREY)
         self.status_badge = ft.Container(
             content=ft.Text("–", size=16),
             padding=10,
-            bgcolor=ft.colors.GREY_200,
+            bgcolor=ft.Colors.GREY_200,
             border_radius=18,
         )
 
@@ -303,7 +303,7 @@ class FotoboxApp:
         self.stats_text = ft.Text("", size=13)
 
         # Log
-        self.log_text = ft.Text("", size=12, color=ft.colors.GREY_600, selectable=True)
+        self.log_text = ft.Text("", size=12, color=ft.Colors.GREY_600, selectable=True)
 
         # Layout zusammenbauen
         header_row = ft.Row(
@@ -344,8 +344,8 @@ class FotoboxApp:
             ),
             padding=16,
             border_radius=16,
-            bgcolor=ft.colors.WHITE,
-            border=ft.border.all(1, ft.colors.GREY_300),
+            bgcolor=ft.Colors.WHITE,
+            border=ft.border.all(1, ft.Colors.GREY_300),
         )
 
         log_card = ft.Container(
@@ -357,8 +357,8 @@ class FotoboxApp:
             ),
             padding=16,
             border_radius=12,
-            bgcolor=ft.colors.GREY_50,
-            border=ft.border.all(1, ft.colors.GREY_200),
+            bgcolor=ft.Colors.GREY_50,
+            border=ft.border.all(1, ft.Colors.GREY_200),
         )
 
         self.page.add(
@@ -429,7 +429,7 @@ class FotoboxApp:
             self.status_text.value = "System wartet auf Start…"
             self.timestamp_text.value = "Noch keine Druckdaten empfangen."
             self.status_badge.content.value = "–"
-            self.status_badge.bgcolor = ft.colors.GREY_200
+            self.status_badge.bgcolor = ft.Colors.GREY_200
             self.progress_bar.value = 0.0
             self.progress_label.value = "Papierstatus: –"
             self.stats_text.value = ""
@@ -458,11 +458,11 @@ class FotoboxApp:
         self.status_text.value = display_text
         self.status_badge.content.value = status_mode.upper()
         if status_mode == "error":
-            self.status_badge.bgcolor = ft.colors.RED_200
+            self.status_badge.bgcolor = ft.Colors.RED_200
         elif status_mode in ("low_paper", "cover_open", "cooldown", "stale"):
-            self.status_badge.bgcolor = ft.colors.ORANGE_200
+            self.status_badge.bgcolor = ft.Colors.ORANGE_200
         else:
-            self.status_badge.bgcolor = ft.colors.GREEN_200
+            self.status_badge.bgcolor = ft.Colors.GREEN_200
 
         if minutes_diff is not None:
             self.timestamp_text.value = f"Letztes Signal: {timestamp} (vor {int(minutes_diff)} Min)"
