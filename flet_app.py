@@ -1,6 +1,7 @@
 import asyncio
-import os
 import datetime
+import logging
+import os
 
 import flet as ft
 import gspread
@@ -9,22 +10,39 @@ import pytz
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
-from aqara_api import AqaraClient  # aktuell noch nur importiert
+from aqara_api import AqaraClient  # aktuell noch nicht genutzt, aber vorbereitet
 
-# .env laden (muss im Projekt-Root liegen)
+# ---------------------------------------------------------
+# Basis-Konfiguration
+# ---------------------------------------------------------
+
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
 PAGE_TITLE = "Fotobox Drucker Status"
 PAGE_ICON = "🖨️"
 
-# --- NICHT geheime Konfiguration (analog zu Streamlit-Version) -----------------
+# Name des Tabs im Google Sheet
+SHEET_TAB_NAME = "DruckerStatus"
 
+# Zeitzone
+LOCAL_TZ = pytz.timezone("Europe/Vienna")
+HEARTBEAT_WARN_MINUTES = 60
+
+# ntfy / dslrBooth Steuerung
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh")
+DSRBOOTH_CONTROL_TOPIC = os.environ.get("DSRBOOTH_CONTROL_TOPIC")
+
+# Login PIN (für spätere Admin-Funktionen)
+APP_LOGIN_PIN = os.environ.get("APP_LOGIN_PIN")
+
+# Drucker-Konfiguration (nicht geheim)
 PRINTERS = {
     "die Fotobox": {
         "key": "standard",
         "warning_threshold": 20,
         "default_max_prints": 400,
-        "cost_per_roll_eur": 46.59,
+        "cost_per_roll_eur": 45,
         "has_admin": True,
         "has_aqara": True,
         "has_dsr": True,
@@ -42,34 +60,32 @@ PRINTERS = {
     },
 }
 
-HEARTBEAT_WARN_MINUTES = 60
-LOCAL_TZ = pytz.timezone("Europe/Vienna")
 
-
-# --------------------------------------------------------------------
-# HILFSFUNKTIONEN (Google Sheets & Statistik)
-# --------------------------------------------------------------------
+# ---------------------------------------------------------
+# Hilfsfunktionen: Google Sheets
+# ---------------------------------------------------------
 
 
 def get_gspread_client() -> gspread.Client:
-    """
-    Für Flet + GitHub verwenden wir einen Service-Account + .env.
-
-    Erwartet:
-      - env GOOGLE_SERVICE_ACCOUNT_FILE -> Pfad zur JSON (z. B. secrets/service_account.json)
-    """
+    """Erzeugt einen gspread Client aus der Service-Account JSON."""
     sa_file = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "secrets/service_account.json")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     creds = Credentials.from_service_account_file(sa_file, scopes=scopes)
     return gspread.authorize(creds)
 
 
-def get_data(sheet_id: str) -> pd.DataFrame:
+def get_data(sheet_id: str, tab_name: str = SHEET_TAB_NAME) -> pd.DataFrame:
+    """Liest den Tab `DruckerStatus` (oder tab_name) aus dem angegebenen Sheet."""
     try:
-        ws = get_gspread_client().open_by_key(sheet_id).sheet1
-        return pd.DataFrame(ws.get_all_records())
+        client = get_gspread_client()
+        sh = client.open_by_key(sheet_id)
+        ws = sh.worksheet(tab_name)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records)
+        logging.info("Google Sheet geladen: %s / Tab: %s / Zeilen: %s", sheet_id, tab_name, len(df))
+        return df
     except Exception as e:
-        print("Fehler beim Laden der Daten:", e)
+        logging.error("Fehler beim Laden der Daten aus Google Sheets: %s", e)
         return pd.DataFrame()
 
 
@@ -78,6 +94,7 @@ def _prepare_history_df(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     if "Timestamp" not in df.columns or "MediaRemaining" not in df.columns:
+        logging.warning("DataFrame ohne benötigte Spalten (Timestamp, MediaRemaining)")
         return pd.DataFrame()
 
     df = df.copy()
@@ -98,9 +115,7 @@ def compute_print_stats(
     window_min: int = 30,
     media_factor: int = 2,
 ) -> dict:
-    """
-    Berechnet Verbrauch und Druckgeschwindigkeit.
-    """
+    """Berechnet Verbrauch und Druckgeschwindigkeit."""
     result = {
         "prints_total": 0,
         "duration_min": 0,
@@ -232,28 +247,68 @@ def evaluate_status_simple(
     return status_mode, display_text, display_color, minutes_diff
 
 
-# --------------------------------------------------------------------
-# FLET APP
-# --------------------------------------------------------------------
+# ---------------------------------------------------------
+# dslrBooth / ntfy: Lock / Unlock
+# ---------------------------------------------------------
+
+
+def lock_dsrbooth():
+    """Sperrt die Fotobox über ntfy (anonym, nur Topic)."""
+    if not DSRBOOTH_CONTROL_TOPIC:
+        logging.warning("DSRBOOTH_CONTROL_TOPIC fehlt in .env – kann nicht sperren.")
+        return False
+
+    url = f"{NTFY_URL.rstrip('/')}/{DSRBOOTH_CONTROL_TOPIC}"
+    try:
+        logging.info("Sende LOCK an %s", url)
+        import requests
+
+        requests.post(url, data="lock", timeout=5)
+        return True
+    except Exception as e:
+        logging.error("Fehler beim Sperren (ntfy): %s", e)
+        return False
+
+
+def unlock_dsrbooth():
+    """Entsperrt die Fotobox über ntfy (anonym, nur Topic)."""
+    if not DSRBOOTH_CONTROL_TOPIC:
+        logging.warning("DSRBOOTH_CONTROL_TOPIC fehlt in .env – kann nicht entsperren.")
+        return False
+
+    url = f"{NTFY_URL.rstrip('/')}/{DSRBOOTH_CONTROL_TOPIC}"
+    try:
+        logging.info("Sende UNLOCK an %s", url)
+        import requests
+
+        requests.post(url, data="unlock", timeout=5)
+        return True
+    except Exception as e:
+        logging.error("Fehler beim Entsperren (ntfy): %s", e)
+        return False
+
+
+# ---------------------------------------------------------
+# Flet App
+# ---------------------------------------------------------
 
 
 class FotoboxApp:
     def __init__(self, page: ft.Page):
         self.page = page
         self.page.title = PAGE_TITLE
-        self.page.window_width = 900
-        self.page.window_height = 700
         self.page.padding = 20
+        self.page.window_width = 1000
+        self.page.window_height = 700
 
         # „Session-State“
         self.event_mode = False
         self.sound_enabled = False
         self.ntfy_active = True
 
-        # Sheet-ID aus ENV ziehen, falls vorhanden
         default_sheet_id = os.environ.get("GOOGLE_SHEET_ID", "")
 
-        # UI-Controls
+        # Controls oben
         self.printer_dropdown = ft.Dropdown(
             label="Drucker",
             options=[ft.dropdown.Option(name) for name in PRINTERS.keys()],
@@ -305,7 +360,19 @@ class FotoboxApp:
         # Log
         self.log_text = ft.Text("", size=12, color=ft.Colors.GREY_600, selectable=True)
 
-        # Layout zusammenbauen
+        # Lock / Unlock Buttons
+        self.lock_button = ft.ElevatedButton(
+            "Sperren",
+            icon=ft.Icons.LOCK,
+            on_click=self.lock_action,
+        )
+        self.unlock_button = ft.ElevatedButton(
+            "Entsperren",
+            icon=ft.Icons.LOCK_OPEN,
+            on_click=self.unlock_action,
+        )
+
+        # Layout
         header_row = ft.Row(
             controls=[
                 ft.Text(f"{PAGE_ICON} {PAGE_TITLE}", size=26, weight=ft.FontWeight.BOLD),
@@ -327,6 +394,11 @@ class FotoboxApp:
                 self.ntfy_switch,
             ],
             spacing=18,
+        )
+
+        lock_row = ft.Row(
+            controls=[self.lock_button, self.unlock_button],
+            spacing=12,
         )
 
         status_card = ft.Container(
@@ -368,6 +440,7 @@ class FotoboxApp:
                     ft.Container(height=10),
                     config_row,
                     switches_row,
+                    lock_row,
                     ft.Divider(),
                     status_card,
                     ft.Container(height=10),
@@ -380,12 +453,14 @@ class FotoboxApp:
         # Live-Loop starten
         self.page.run_task(self.live_loop)
 
-    # ----------------------------------------------------------------
-    # Event-Handler
-    # ----------------------------------------------------------------
+    # ---------------- Event-Handler ----------------
 
     def on_printer_change(self, e: ft.ControlEvent):
-        self.append_log(f"Drucker gewechselt auf: {self.printer_dropdown.value}")
+        name = self.printer_dropdown.value
+        self.append_log(f"Drucker gewechselt auf: {name}")
+
+        # Wenn du später unterschiedliche Sheets per Drucker willst, kannst du hier
+        # GOOGLE_SHEET_ID_DIEFOTOBOX / _WEINKELLEREI aus .env verwenden.
 
     def on_sheet_change(self, e: ft.ControlEvent):
         self.append_log("Sheet-ID geändert.")
@@ -402,9 +477,21 @@ class FotoboxApp:
         self.ntfy_active = self.ntfy_switch.value
         self.append_log(f"ntfy: {self.ntfy_active}")
 
-    # ----------------------------------------------------------------
-    # Live-Loop & Status-Update
-    # ----------------------------------------------------------------
+    def lock_action(self, e: ft.ControlEvent):
+        self.append_log("Sperre Fotobox…")
+        if lock_dsrbooth():
+            self.append_log("Fotobox wurde gesperrt.")
+        else:
+            self.append_log("Fehler beim Sperren (Details im Server-Log).")
+
+    def unlock_action(self, e: ft.ControlEvent):
+        self.append_log("Entsperre Fotobox…")
+        if unlock_dsrbooth():
+            self.append_log("Fotobox wurde entsperrt.")
+        else:
+            self.append_log("Fehler beim Entsperren (Details im Server-Log).")
+
+    # ---------------- Live-Loop ----------------
 
     async def live_loop(self):
         while True:
@@ -412,19 +499,19 @@ class FotoboxApp:
             await asyncio.sleep(10)
 
     async def update_status(self):
-        sheet_id = self.sheet_id_field.value.strip() or os.environ.get("GOOGLE_SHEET_ID", "")
+        sheet_id = (self.sheet_id_field.value or "").strip() or os.environ.get("GOOGLE_SHEET_ID", "")
         if not sheet_id:
             self.status_text.value = "Bitte Google Sheet ID eintragen."
             self.page.update()
             return
 
-        printer_cfg = PRINTERS.get(self.printer_dropdown.value)
-        media_factor = printer_cfg.get("media_factor", 1) if printer_cfg else 1
-        warning_threshold = printer_cfg.get("warning_threshold", 20) if printer_cfg else 20
-        max_prints = printer_cfg.get("default_max_prints", 400) if printer_cfg else 400
-        cost_per_roll = printer_cfg.get("cost_per_roll_eur") if printer_cfg else None
+        printer_cfg = PRINTERS.get(self.printer_dropdown.value, {})
+        media_factor = printer_cfg.get("media_factor", 1)
+        warning_threshold = printer_cfg.get("warning_threshold", 20)
+        max_prints = printer_cfg.get("default_max_prints", 400)
+        cost_per_roll = printer_cfg.get("cost_per_roll_eur")
 
-        df = get_data(sheet_id)
+        df = get_data(sheet_id, SHEET_TAB_NAME)
         if df.empty:
             self.status_text.value = "System wartet auf Start…"
             self.timestamp_text.value = "Noch keine Druckdaten empfangen."
@@ -454,7 +541,6 @@ class FotoboxApp:
             warning_threshold=warning_threshold,
         )
 
-        # Status-Badge + Text
         self.status_text.value = display_text
         self.status_badge.content.value = status_mode.upper()
         if status_mode == "error":
@@ -502,9 +588,7 @@ class FotoboxApp:
 
         self.page.update()
 
-    # ----------------------------------------------------------------
-    # Hilfs-Log
-    # ----------------------------------------------------------------
+    # ---------------- Logging-Helfer ----------------
 
     def append_log(self, msg: str):
         now = datetime.datetime.now().strftime("%H:%M:%S")
@@ -521,4 +605,9 @@ def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.app(
+        target=main,
+        view=None,          # nur Web
+        port=8550,
+        host="0.0.0.0",
+    )
