@@ -10,7 +10,7 @@ import pytz
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
-from aqara_api import AqaraClient  # aktuell noch nicht genutzt, aber vorbereitet
+from aqara_api import AqaraClient  # noch nicht genutzt, aber vorbereitet
 
 # ---------------------------------------------------------
 # Basis-Konfiguration
@@ -36,7 +36,7 @@ DSRBOOTH_CONTROL_TOPIC = os.environ.get("DSRBOOTH_CONTROL_TOPIC")
 # Login PIN (für spätere Admin-Funktionen)
 APP_LOGIN_PIN = os.environ.get("APP_LOGIN_PIN")
 
-# Drucker-Konfiguration (nicht geheim)
+# Drucker-Konfiguration
 PRINTERS = {
     "die Fotobox": {
         "key": "standard",
@@ -47,6 +47,7 @@ PRINTERS = {
         "has_aqara": True,
         "has_dsr": True,
         "media_factor": 1,
+        "env_sheet_key": "GOOGLE_SHEET_ID_DIEFOTOBOX",
     },
     "Weinkellerei": {
         "key": "Weinkellerei",
@@ -57,6 +58,7 @@ PRINTERS = {
         "has_aqara": False,
         "has_dsr": False,
         "media_factor": 2,
+        "env_sheet_key": "GOOGLE_SHEET_ID_WEINKELLEREI",
     },
 }
 
@@ -75,7 +77,10 @@ def get_gspread_client() -> gspread.Client:
 
 
 def get_data(sheet_id: str, tab_name: str = SHEET_TAB_NAME) -> pd.DataFrame:
-    """Liest den Tab `DruckerStatus` (oder tab_name) aus dem angegebenen Sheet."""
+    """
+    Liest den Tab `DruckerStatus` aus dem angegebenen Sheet.
+    Gibt IMMER ein DataFrame zurück (ggf. leer).
+    """
     try:
         client = get_gspread_client()
         sh = client.open_by_key(sheet_id)
@@ -298,8 +303,9 @@ class FotoboxApp:
         self.page = page
         self.page.title = PAGE_TITLE
         self.page.padding = 20
-        self.page.window_width = 1000
-        self.page.window_height = 700
+        self.page.bgcolor = ft.Colors.GREY_50
+        self.page.window_width = 1100
+        self.page.window_height = 750
 
         # „Session-State“
         self.event_mode = False
@@ -330,18 +336,18 @@ class FotoboxApp:
             on_change=self.on_event_toggle,
         )
         self.sound_switch = ft.Switch(
-            label="Sound bei Warnungen (nur Anzeige, noch ohne Logik)",
+            label="Sound bei Warnungen (noch ohne Logik)",
             value=self.sound_enabled,
             on_change=self.on_sound_toggle,
         )
         self.ntfy_switch = ft.Switch(
-            label="Push-Benachrichtigungen aktiv (nur Anzeige, Logik TODO)",
+            label="Push-Benachrichtigungen aktiv (Anzeige, Logik TODO)",
             value=self.ntfy_active,
             on_change=self.on_ntfy_toggle,
         )
 
         # Status-Anzeige
-        self.status_text = ft.Text("System wartet auf Start…", size=20, weight=ft.FontWeight.BOLD)
+        self.status_text = ft.Text("System wartet auf Start…", size=22, weight=ft.FontWeight.BOLD)
         self.timestamp_text = ft.Text("", size=12, color=ft.Colors.GREY)
         self.status_badge = ft.Container(
             content=ft.Text("–", size=16),
@@ -351,31 +357,31 @@ class FotoboxApp:
         )
 
         # Papier-Progress
-        self.progress_bar = ft.ProgressBar(width=400, value=0.0)
+        self.progress_bar = ft.ProgressBar(width=500, value=0.0)
         self.progress_label = ft.Text("Papierstatus: –", size=14)
 
         # Statistik
         self.stats_text = ft.Text("", size=13)
 
         # Log
-        self.log_text = ft.Text("", size=12, color=ft.Colors.GREY_600, selectable=True)
+        self.log_text = ft.Text("", size=12, color=ft.Colors.GREY_700, selectable=True)
 
         # Lock / Unlock Buttons
         self.lock_button = ft.ElevatedButton(
             "Sperren",
-            icon=ft.Icons.LOCK,
+            icon=ft.icons.LOCK,
             on_click=self.lock_action,
         )
         self.unlock_button = ft.ElevatedButton(
             "Entsperren",
-            icon=ft.Icons.LOCK_OPEN,
+            icon=ft.icons.LOCK_OPEN,
             on_click=self.unlock_action,
         )
 
         # Layout
         header_row = ft.Row(
             controls=[
-                ft.Text(f"{PAGE_ICON} {PAGE_TITLE}", size=26, weight=ft.FontWeight.BOLD),
+                ft.Text(f"{PAGE_ICON} {PAGE_TITLE}", size=28, weight=ft.FontWeight.BOLD),
             ],
         )
 
@@ -414,10 +420,11 @@ class FotoboxApp:
                 ],
                 spacing=8,
             ),
-            padding=16,
-            border_radius=16,
+            padding=20,
+            border_radius=18,
             bgcolor=ft.Colors.WHITE,
             border=ft.border.all(1, ft.Colors.GREY_300),
+            width=900,
         )
 
         log_card = ft.Container(
@@ -425,16 +432,19 @@ class FotoboxApp:
                 controls=[
                     ft.Text("Log", weight=ft.FontWeight.BOLD),
                     self.log_text,
-                ]
+                ],
+                spacing=6,
             ),
             padding=16,
-            border_radius=12,
-            bgcolor=ft.Colors.GREY_50,
+            border_radius=16,
+            bgcolor=ft.Colors.WHITE,
             border=ft.border.all(1, ft.Colors.GREY_200),
+            width=900,
         )
 
         self.page.add(
             ft.Column(
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 controls=[
                     header_row,
                     ft.Container(height=10),
@@ -446,24 +456,36 @@ class FotoboxApp:
                     ft.Container(height=10),
                     log_card,
                 ],
-                spacing=10,
+                spacing=14,
             )
         )
+
+        # Beim Start Drucker-Auswahl auf env setzen
+        self.apply_printer_sheet_from_env()
 
         # Live-Loop starten
         self.page.run_task(self.live_loop)
 
     # ---------------- Event-Handler ----------------
 
-    def on_printer_change(self, e: ft.ControlEvent):
-        name = self.printer_dropdown.value
-        self.append_log(f"Drucker gewechselt auf: {name}")
+    def apply_printer_sheet_from_env(self):
+        """Holt je nach ausgewähltem Drucker die passende Sheet-ID aus .env."""
+        printer_name = self.printer_dropdown.value
+        cfg = PRINTERS.get(printer_name, {})
+        env_key = cfg.get("env_sheet_key")
+        if env_key:
+            sheet_id = os.environ.get(env_key)
+            if sheet_id:
+                self.sheet_id_field.value = sheet_id
+                self.append_log(f"Sheet-ID aus .env gesetzt ({env_key}).")
+                self.page.update()
 
-        # Wenn du später unterschiedliche Sheets per Drucker willst, kannst du hier
-        # GOOGLE_SHEET_ID_DIEFOTOBOX / _WEINKELLEREI aus .env verwenden.
+    def on_printer_change(self, e: ft.ControlEvent):
+        self.append_log(f"Drucker gewechselt auf: {self.printer_dropdown.value}")
+        self.apply_printer_sheet_from_env()
 
     def on_sheet_change(self, e: ft.ControlEvent):
-        self.append_log("Sheet-ID geändert.")
+        self.append_log("Sheet-ID manuell geändert.")
 
     def on_event_toggle(self, e: ft.ControlEvent):
         self.event_mode = self.event_switch.value
@@ -512,9 +534,11 @@ class FotoboxApp:
         cost_per_roll = printer_cfg.get("cost_per_roll_eur")
 
         df = get_data(sheet_id, SHEET_TAB_NAME)
+
+        # Keine Zeilen im Sheet
         if df.empty:
-            self.status_text.value = "System wartet auf Start…"
-            self.timestamp_text.value = "Noch keine Druckdaten empfangen."
+            self.status_text.value = f"System wartet auf Start… (Tab '{SHEET_TAB_NAME}' hat 0 Zeilen)"
+            self.timestamp_text.value = "Noch keine Druckdaten im Google Sheet."
             self.status_badge.content.value = "–"
             self.status_badge.bgcolor = ft.Colors.GREY_200
             self.progress_bar.value = 0.0
@@ -522,6 +546,24 @@ class FotoboxApp:
             self.stats_text.value = ""
             self.page.update()
             return
+
+        # Spaltenprüfung
+        required_cols = {"Timestamp", "Status", "MediaRemaining"}
+        if not required_cols.issubset(df.columns):
+            missing = required_cols - set(df.columns)
+            self.status_text.value = (
+                f"Fehlende Spalten im Tab '{SHEET_TAB_NAME}': {', '.join(missing)}"
+            )
+            self.timestamp_text.value = "Bitte Spaltennamen im Sheet prüfen."
+            self.status_badge.content.value = "SCHEMA"
+            self.status_badge.bgcolor = ft.Colors.ORANGE_200
+            self.progress_bar.value = 0.0
+            self.progress_label.value = "Papierstatus: –"
+            self.stats_text.value = ""
+            self.page.update()
+            return
+
+        self.append_log(f"Daten geladen: {len(df)} Zeilen.")
 
         last = df.iloc[-1]
         timestamp = str(last.get("Timestamp", ""))
