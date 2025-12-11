@@ -1,0 +1,8 @@
+flet
+gspread
+google-auth
+google-auth-oauthlib
+pandas
+pytz
+requests
+python-dotenv
